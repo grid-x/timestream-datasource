@@ -4,9 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"time"
+
 	"github.com/grafana/grafana-aws-sdk/pkg/awsauth"
 	"github.com/grafana/grafana-plugin-sdk-go/data"
-	"time"
 
 	"github.com/grafana/grafana-plugin-sdk-go/backend"
 	sdkhttpclient "github.com/grafana/grafana-plugin-sdk-go/backend/httpclient"
@@ -256,7 +257,9 @@ func (ds *timestreamDS) ExecuteQuery(ctx context.Context, query models.QueryMode
 
 	if query.NextToken != "" {
 		input.NextToken = aws.String(query.NextToken)
-		backend.Logger.Info("running continue query", "token", query.NextToken)
+		backend.Logger.Info("running continue query", "query", raw, "token", query.NextToken)
+	} else {
+		backend.Logger.Info("starting query", "query", raw)
 	}
 
 	start := time.Now().UnixMilli()
