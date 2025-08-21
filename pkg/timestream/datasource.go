@@ -15,6 +15,7 @@ import (
 	"github.com/grafana/grafana-plugin-sdk-go/backend/resource"
 	"github.com/grafana/grafana-plugin-sdk-go/experimental/errorsource"
 	"github.com/grafana/timestream-datasource/pkg/models"
+	"github.com/grafana/timestream-datasource/pkg/timestream/validator"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/timestreamquery"
@@ -250,6 +251,10 @@ func (ds *timestreamDS) ExecuteQuery(ctx context.Context, query models.QueryMode
 	raw, err := Interpolate(query, ds.Settings)
 	if err != nil {
 		return errorsource.Response(err)
+	}
+	valid, issues := validator.Validate(raw, nil)
+	if !valid {
+		return backend.ErrDataResponse(backend.StatusBadRequest, "reasonable query check failed: "+issues[0].Reason)
 	}
 	input := &timestreamquery.QueryInput{
 		QueryString: aws.String(raw),
