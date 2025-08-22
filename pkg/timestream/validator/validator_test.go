@@ -286,6 +286,22 @@ FROM mydb.sensors
 WHERE time BETWEEN ago(1d) AND now() AND measure_name != 'bar'`,
 			want: false,
 		},
+		{
+			desc: "measure_name in parantheses",
+			input: `
+SELECT *
+FROM mydb.sensors
+WHERE time BETWEEN ago(1d) AND now() AND (measure_name = 'foo')`,
+			want: true,
+		},
+		{
+			desc: "time in parantheses",
+			input: `
+SELECT *
+FROM mydb.sensors
+WHERE (time BETWEEN ago(1d) AND now()) AND measure_name = 'foo'`,
+			want: true,
+		},
 	}
 
 	for _, tc := range testcases {

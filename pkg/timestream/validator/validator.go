@@ -97,18 +97,8 @@ func Validate(sql string, opts *Options) (bool, []Issue) {
 		// WHERE body ends at next clause (group/order/having/union/...) or on depth drop.
 		whereStop := findNextTerminatorAtDepth(toks, whereIdx+1, s.depth)
 
-		// Malformed WHERE like "WHERE AND ..." (no predicate before conjunction) should fail.
-		if whereStartsWithConjunction(toks, whereIdx+1, whereStop, s.depth) {
-			issues = append(issues, Issue{
-				Snippet: snippetAroundTokens(toks, s.selIdx, whereStop),
-				Reason:  "WHERE clause starts with AND/OR; no predicate before it",
-				AtDepth: s.depth,
-			})
-			continue
-		}
-
 		// Check for time predicate.
-		if !whereHasTimePredicate(toks, whereIdx+1, whereStop, s.depth) {
+		if !whereHasTimePredicate(toks, whereIdx+1, whereStop) {
 			issues = append(issues, Issue{
 				Snippet: snippetAroundTokens(toks, s.selIdx, whereStop),
 				Reason:  "WHERE clause lacks a time predicate",
@@ -116,7 +106,7 @@ func Validate(sql string, opts *Options) (bool, []Issue) {
 			})
 		}
 
-		if !whereHasMeasureNamePredicate(toks, whereIdx+1, whereStop, s.depth) {
+		if !whereHasMeasureNamePredicate(toks, whereIdx+1, whereStop) {
 			issues = append(issues, Issue{
 				Snippet: snippetAroundTokens(toks, s.selIdx, whereStop),
 				Reason:  "WHERE clause lacks a measure_name equality condition",
@@ -428,40 +418,16 @@ func fromStartsWithBaseTable(toks []token, start, stop, depth int) bool {
 	return false
 }
 
-// True if WHERE body is empty or begins with AND/OR (malformed "WHERE AND ...").
-// Skips stray symbol tokens at the start of the WHERE body.
-func whereStartsWithConjunction(toks []token, start, stop, depth int) bool {
-	for i := start; i < stop && i < len(toks); i++ {
-		if toks[i].depth != depth {
-			continue
-		}
-		// Skip punctuation/symbols at this depth
-		if toks[i].kind == tkSymbol {
-			continue
-		}
-		// First meaningful token at this depth:
-		if toks[i].kind == tkKeyword && (toks[i].val == "and" || toks[i].val == "or") {
-			return true
-		}
-		return false
-	}
-	// No tokens in WHERE body
-	return true
-}
-
-func whereHasTimePredicate(toks []token, start, stop, depth int) bool {
+func whereHasTimePredicate(toks []token, start, stop int) bool {
 	if stop < 0 {
 		stop = len(toks)
 	}
 
 	for i := start; i < stop && i < len(toks); i++ {
-		if toks[i].depth != depth {
-			continue
-		}
-
 		// Simple comparisons: time [op] ...
-		if isTimeIdentifierAt(toks, i, depth) {
+		if isTimeIdentifierAt(toks, i) {
 			// Look ahead for operator at same depth (optionally allow NOT before BETWEEN).
+			depth := toks[i].depth
 			j := i + 1
 			for j < stop && toks[j].depth != depth {
 				j++
@@ -488,14 +454,12 @@ func whereHasTimePredicate(toks []token, start, stop, depth int) bool {
 
 		// Also handle encountering BETWEEN first, then look back for time column within a small window.
 		if toks[i].kind == tkKeyword && toks[i].val == "between" {
+			depth := toks[i].depth
 			for k := i - 1; k >= start && k >= i-6; k-- {
-				if toks[k].depth != depth {
-					continue
-				}
 				if toks[k].kind == tkKeyword && toks[k].val == "not" {
 					continue
 				}
-				if isTimeIdentifierAt(toks, k, depth) {
+				if isTimeIdentifierAt(toks, k) && toks[k].depth == depth {
 					return true
 				}
 			}
@@ -504,17 +468,13 @@ func whereHasTimePredicate(toks []token, start, stop, depth int) bool {
 	return false
 }
 
-func whereHasMeasureNamePredicate(toks []token, start, stop, depth int) bool {
+func whereHasMeasureNamePredicate(toks []token, start, stop int) bool {
 	if stop < 0 {
 		stop = len(toks)
 	}
 
 	found := false
 	for i := start; i < stop && i < len(toks); i++ {
-		if toks[i].depth != depth {
-			continue
-		}
-
 		if toks[i].kind == tkIdent && toks[i].val == "measure_name" {
 			if i+2 < stop && toks[i+1].kind == tkSymbol && toks[i+1].val == "=" &&
 				toks[i+2].kind == tkString {
@@ -543,11 +503,11 @@ func stripQuotes(s string) string {
 }
 
 // isTimeIdentifierAt checks if tokens at position i denote a time column.
-func isTimeIdentifierAt(toks []token, i, depth int) bool {
+func isTimeIdentifierAt(toks []token, i int) bool {
 	if i < 0 || i >= len(toks) {
 		return false
 	}
-	if toks[i].depth != depth || toks[i].kind != tkIdent {
+	if toks[i].kind != tkIdent {
 		return false
 	}
 
