@@ -97,16 +97,6 @@ func Validate(sql string, opts *Options) (bool, []Issue) {
 		// WHERE body ends at next clause (group/order/having/union/...) or on depth drop.
 		whereStop := findNextTerminatorAtDepth(toks, whereIdx+1, s.depth)
 
-		// Malformed WHERE like "WHERE AND ..." (no predicate before conjunction) should fail.
-		if whereStartsWithConjunction(toks, whereIdx+1, whereStop, s.depth) {
-			issues = append(issues, Issue{
-				Snippet: snippetAroundTokens(toks, s.selIdx, whereStop),
-				Reason:  "WHERE clause starts with AND/OR; no predicate before it",
-				AtDepth: s.depth,
-			})
-			continue
-		}
-
 		// Check for time predicate.
 		if !whereHasTimePredicate(toks, whereIdx+1, whereStop, s.depth) {
 			issues = append(issues, Issue{
@@ -426,27 +416,6 @@ func fromStartsWithBaseTable(toks []token, start, stop, depth int) bool {
 	}
 
 	return false
-}
-
-// True if WHERE body is empty or begins with AND/OR (malformed "WHERE AND ...").
-// Skips stray symbol tokens at the start of the WHERE body.
-func whereStartsWithConjunction(toks []token, start, stop, depth int) bool {
-	for i := start; i < stop && i < len(toks); i++ {
-		if toks[i].depth != depth {
-			continue
-		}
-		// Skip punctuation/symbols at this depth
-		if toks[i].kind == tkSymbol {
-			continue
-		}
-		// First meaningful token at this depth:
-		if toks[i].kind == tkKeyword && (toks[i].val == "and" || toks[i].val == "or") {
-			return true
-		}
-		return false
-	}
-	// No tokens in WHERE body
-	return true
 }
 
 func whereHasTimePredicate(toks []token, start, stop, depth int) bool {
