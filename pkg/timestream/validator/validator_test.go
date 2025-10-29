@@ -302,6 +302,75 @@ FROM mydb.sensors
 WHERE (time BETWEEN ago(1d) AND now()) AND measure_name = 'foo'`,
 			want: true,
 		},
+		{
+			desc: "invalid measure_name (mixed equality and inequality)",
+			input: `SELECT * FROM "db"."tbl"
+                    WHERE time > 10
+                    AND measure_name = 'foo'
+                    AND measure_name != 'bar'`,
+			want: false, // Fails due to measure_name check
+		},
+		{
+			desc: "user query with top-level OR that bypasses filter",
+			input: `SELECT DISTINCT ds_account FROM "db"."tbl" WHERE
+                    time BETWEEN from_milliseconds(1) AND from_milliseconds(2)
+                    AND measure_name = 'foo'
+                    AND ds_account != 'provisioning'
+                    OR ds_account != 'eis'`,
+			want: false,
+		},
+		{
+			desc: "user query with nested OR",
+			input: `SELECT DISTINCT ds_account FROM "db"."tbl" WHERE
+                    time BETWEEN from_milliseconds(1) AND from_milliseconds(2)
+                    AND measure_name = 'foo'
+                    AND (ds_account != 'provisioning'
+                    OR ds_account != 'eis')`,
+			want: true,
+		},
+		{
+			desc: "valid top-level OR with filters in each branch",
+			input: `SELECT * FROM "db"."tbl"
+                    WHERE (time > 10 AND measure_name = 'a')
+                    OR (time < 5 AND measure_name = 'b')`,
+			want: true,
+		},
+		{
+			desc: "valid parenthesized OR with top-level filters",
+			input: `SELECT * FROM "db"."tbl"
+                    WHERE time > 10 AND measure_name = 'a'
+                    AND (device = 'd1' OR device = 'd2')`,
+			want: true,
+		},
+		{
+			desc: "valid parenthesized OR with top-level filters",
+			input: `SELECT * FROM "db"."tbl"
+                    WHERE time > 10 AND measure_name = 'a'
+                    AND (device = 'd1' OR device = 'd2')`,
+			want: true,
+		},
+		{
+			desc: "valid top-level OR with nested (parenthesized) ORs",
+			input: `SELECT * FROM "db"."tbl"
+                    WHERE (time > 10 AND measure_name = 'a' AND (device = 'd1' OR device = 'd2'))
+                    OR (time < 5 AND measure_name = 'b' AND (device = 'd3' OR device = 'd4'))`,
+			want: true,
+		},
+		{
+			desc: "invalid top-level OR, one branch has nested OR but no time filter",
+			input: `SELECT * FROM "db"."tbl"
+                    WHERE (time > 10 AND measure_name = 'a')
+                    OR (measure_name = 'b' AND (device = 'd1' OR device = 'd2'))`,
+			want: false,
+		},
+		{
+			desc: "FALSE POSITIVE: invalid top-level OR, one branch has nested OR but no time filter",
+			input: `SELECT * FROM "db"."tbl"
+					WHERE
+  					(time > ago(1h) OR device = 'd1')
+  					AND measure_name = 'foo'`,
+			want: true, // This is a false positive as the current implementation only checks for OR clauses at the Top-Level
+		},
 	}
 
 	for _, tc := range testcases {

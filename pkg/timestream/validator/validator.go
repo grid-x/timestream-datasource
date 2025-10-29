@@ -26,12 +26,6 @@ import (
 	"unicode"
 )
 
-type Options struct {
-	// TimeColumns lists identifiers that count as the "time" column.
-	// Defaults to []string{"time", "measure_time"} if nil/empty.
-	TimeColumns []string
-}
-
 type Issue struct {
 	Snippet string
 	Reason  string
@@ -40,15 +34,7 @@ type Issue struct {
 
 // Validate returns true if every SELECT that directly reads from a table
 // has a WHERE time filter; otherwise returns false and the list of issues.
-func Validate(sql string, opts *Options) (bool, []Issue) {
-	timeCols := []string{"time"}
-	if opts != nil && len(opts.TimeColumns) > 0 {
-		timeCols = make([]string, len(opts.TimeColumns))
-		for i, c := range opts.TimeColumns {
-			timeCols[i] = strings.ToLower(c)
-		}
-	}
-
+func Validate(sql string) (bool, []Issue) {
 	src := stripComments(sql)
 	toks := lex(src)
 
@@ -97,25 +83,78 @@ func Validate(sql string, opts *Options) (bool, []Issue) {
 		// WHERE body ends at next clause (group/order/having/union/...) or on depth drop.
 		whereStop := findNextTerminatorAtDepth(toks, whereIdx+1, s.depth)
 
-		// Check for time predicate.
-		if !whereHasTimePredicate(toks, whereIdx+1, whereStop) {
+		// Logic to handle top-level ORs
+		branches := findTopLevelOrBranches(toks, whereIdx+1, whereStop, s.depth)
+
+		hasMissingTime := false
+		hasMissingMeasure := false
+		hasInvalidOr := len(branches) > 1
+
+		for _, branch := range branches {
+			branchStart, branchStop := branch[0], branch[1]
+
+			// Check for time predicate.
+			if !whereHasTimePredicate(toks, branchStart, branchStop) {
+				hasMissingTime = true
+			}
+
+			// Check for measure_name predicate
+			if !whereHasMeasureNamePredicate(toks, branchStart, branchStop) {
+				hasMissingMeasure = true
+			}
+		}
+
+		// Report issues.
+		if hasMissingTime {
+			reason := "WHERE clause lacks a time predicate"
+			if hasInvalidOr {
+				reason = "an OR branch in WHERE clause lacks a time predicate"
+			}
 			issues = append(issues, Issue{
 				Snippet: snippetAroundTokens(toks, s.selIdx, whereStop),
-				Reason:  "WHERE clause lacks a time predicate",
+				Reason:  reason,
 				AtDepth: s.depth,
 			})
 		}
 
-		if !whereHasMeasureNamePredicate(toks, whereIdx+1, whereStop) {
+		if hasMissingMeasure {
+			reason := "WHERE clause lacks a measure_name equality condition"
+			if hasInvalidOr {
+				reason = "an OR branch in WHERE clause lacks a measure_name equality condition"
+			}
 			issues = append(issues, Issue{
 				Snippet: snippetAroundTokens(toks, s.selIdx, whereStop),
-				Reason:  "WHERE clause lacks a measure_name equality condition",
+				Reason:  reason,
 				AtDepth: s.depth,
 			})
 		}
 	}
 
 	return len(issues) == 0, issues
+}
+
+// NEW FUNCTION: Splits a token range by top-level OR keywords.
+func findTopLevelOrBranches(toks []token, start, stop, depth int) [][2]int {
+	var branches [][2]int
+	currentBranchStart := start
+
+	if stop < 0 {
+		stop = len(toks)
+	}
+
+	for i := start; i < stop && i < len(toks); i++ {
+		// If we find an 'OR' at the same depth, it's a separator.
+		if toks[i].depth == depth && toks[i].kind == tkKeyword && toks[i].val == "or" {
+			// Add the branch ending just before this 'OR'
+			branches = append(branches, [2]int{currentBranchStart, i})
+			// Start the next branch just after this 'OR'
+			currentBranchStart = i + 1
+		}
+	}
+	// Add the final branch (or the only branch, if no 'OR' was found)
+	branches = append(branches, [2]int{currentBranchStart, stop})
+
+	return branches
 }
 
 /* -------------------- internal: lexer & helpers -------------------- */
@@ -417,7 +456,6 @@ func fromStartsWithBaseTable(toks []token, start, stop, depth int) bool {
 
 	return false
 }
-
 func whereHasTimePredicate(toks []token, start, stop int) bool {
 	if stop < 0 {
 		stop = len(toks)
@@ -429,25 +467,25 @@ func whereHasTimePredicate(toks []token, start, stop int) bool {
 			// Look ahead for operator at same depth (optionally allow NOT before BETWEEN).
 			depth := toks[i].depth
 			j := i + 1
-			for j < stop && toks[j].depth != depth {
+			for j < stop && j < len(toks) && toks[j].depth != depth {
 				j++
 			}
 			// NOT BETWEEN pattern: time NOT BETWEEN ...
-			if j < stop && toks[j].kind == tkKeyword && toks[j].val == "not" {
+			if j < stop && j < len(toks) && toks[j].kind == tkKeyword && toks[j].val == "not" {
 				k := j + 1
-				for k < stop && toks[k].depth != depth {
+				for k < stop && k < len(toks) && toks[k].depth != depth {
 					k++
 				}
-				if k < stop && toks[k].kind == tkKeyword && toks[k].val == "between" {
+				if k < stop && k < len(toks) && toks[k].kind == tkKeyword && toks[k].val == "between" {
 					return true
 				}
 			}
 			// BETWEEN pattern: time BETWEEN ...
-			if j < stop && toks[j].kind == tkKeyword && toks[j].val == "between" {
+			if j < stop && j < len(toks) && toks[j].kind == tkKeyword && toks[j].val == "between" {
 				return true
 			}
 			// Comparison operator pattern
-			if j < stop && toks[j].kind == tkSymbol && isCompareOp(toks[j].val) {
+			if j < stop && j < len(toks) && toks[j].kind == tkSymbol && isCompareOp(toks[j].val) {
 				return true
 			}
 		}
@@ -473,18 +511,25 @@ func whereHasMeasureNamePredicate(toks []token, start, stop int) bool {
 		stop = len(toks)
 	}
 
-	found := false
+	foundValid := false
+	foundInvalid := false // Flag for any non-equality use
+
 	for i := start; i < stop && i < len(toks); i++ {
 		if toks[i].kind == tkIdent && toks[i].val == "measure_name" {
-			if i+2 < stop && toks[i+1].kind == tkSymbol && toks[i+1].val == "=" &&
+			// Check for valid: measure_name = 'string'
+			if i+2 < stop && i+2 < len(toks) &&
+				toks[i+1].kind == tkSymbol && toks[i+1].val == "=" &&
 				toks[i+2].kind == tkString {
-				// found at least one equality condition, but any further occurrences of "measure_name" also need to be equality conditions -
-				// we don't want to allow something like `measure_name = 'foo' OR measure_name != 'bar'`
-				found = true
+
+				foundValid = true
+			} else {
+				// Any other use of measure_name (e.g., !=, LIKE, or just by itself) is invalid
+				foundInvalid = true
 			}
 		}
 	}
-	return found
+	// Must have at least one valid condition and NO invalid conditions.
+	return foundValid && !foundInvalid
 }
 
 func isCompareOp(s string) bool {
@@ -502,7 +547,6 @@ func stripQuotes(s string) string {
 	return strings.ToLower(s)
 }
 
-// isTimeIdentifierAt checks if tokens at position i denote a time column.
 func isTimeIdentifierAt(toks []token, i int) bool {
 	if i < 0 || i >= len(toks) {
 		return false
@@ -512,15 +556,6 @@ func isTimeIdentifierAt(toks []token, i int) bool {
 	}
 
 	return toks[i].val == "time"
-}
-
-func inStrSlice(s string, arr []string) bool {
-	for _, v := range arr {
-		if s == v {
-			return true
-		}
-	}
-	return false
 }
 
 func snippetAroundTokens(toks []token, start, stop int) string {

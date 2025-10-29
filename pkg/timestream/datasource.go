@@ -252,7 +252,7 @@ func (ds *timestreamDS) ExecuteQuery(ctx context.Context, query models.QueryMode
 	if err != nil {
 		return errorsource.Response(err)
 	}
-	valid, issues := validator.Validate(raw, nil)
+	valid, issues := validator.Validate(raw)
 	if !valid {
 		return backend.ErrDataResponse(backend.StatusBadRequest, "reasonable query check failed: "+issues[0].Reason)
 	}
