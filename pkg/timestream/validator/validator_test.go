@@ -371,13 +371,44 @@ WHERE (time BETWEEN ago(1d) AND now()) AND measure_name = 'foo'`,
   					AND measure_name = 'foo'`,
 			want: true, // This is a false positive as the current implementation only checks for OR clauses at the Top-Level
 		},
+		{
+			desc: "ORed conditions with ANDed timeFilter",
+			input: `
+			SELECT DISTINCT
+			ds_account
+			FROM "ds-metric-forward-v3"."metrics" 
+			WHERE 
+			time > ago(2h) AND 
+			(
+				measure_name = 'gridx.ds.os_rebrusher.init' OR
+				measure_name = 'gridx.ds.os_rebrusher.detect' OR
+				measure_name = 'gridx.ds.os_rebrusher.checkprevious' OR
+				measure_name = 'gridx.ds.os_rebrusher.update' OR
+				measure_name = 'gridx.ds.os_rebrusher.waitreboot' OR
+				measure_name = 'gridx.ds.os_rebrusher.reboot' OR
+				measure_name = 'gridx.ds.os_rebrusher.error' OR
+				measure_name = 'gridx.ds.os_rebrusher.waiting'
+				)`,
+			want: true,
+		},
+		{
+			desc: "regex_like as measure_name equality condition",
+			input: `
+	SELECT DISTINCT
+	  ds_account
+	FROM "ds-metric-forward-v3"."metrics" 
+	WHERE 
+	  time > ago(2h) AND 
+	  regexp_like(measure_name, '^gridx\\.ds\\.os_rebrusher.*$')`,
+			want: true,
+		},
 	}
 
 	for _, tc := range testcases {
 		tc := tc
 		t.Run(tc.desc, func(t *testing.T) {
 			t.Parallel()
-			got, issues := Validate(tc.input, nil)
+			got, issues := Validate(tc.input)
 			if got != tc.want {
 				t.Errorf("%s: want %v, got %v, issues: %+v", tc.desc, tc.want, got, issues)
 			}

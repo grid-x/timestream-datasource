@@ -16,8 +16,8 @@ package validator
 //   - A valid time filter is any predicate in WHERE that references one of
 //     the allowed time columns (default: time, measure_time) and uses BETWEEN
 //     (with optional NOT) or comparison operators (=, <, <=, >, >=, <>, !=).
-//   - For measure_name, we are more restrictive: all occurrences of it have to be exact
-//     equality conditions (measure_name = 'foo').
+//   - For measure_name, we are more restrictive: all occurrences of it have to be valid
+//     conditions (e.g., measure_name = 'foo' or regexp_like(measure_name, '...')).
 //
 // Note: This is intentionally heuristic and aims to be practical for Timestream.
 
@@ -118,9 +118,9 @@ func Validate(sql string) (bool, []Issue) {
 		}
 
 		if hasMissingMeasure {
-			reason := "WHERE clause lacks a measure_name equality condition"
+			reason := "WHERE clause lacks a valid measure_name predicate (requires = '...' or regexp_like)"
 			if hasInvalidOr {
-				reason = "an OR branch in WHERE clause lacks a measure_name equality condition"
+				reason = "an OR branch in WHERE clause lacks a valid measure_name predicate (requires = '...' or regexp_like)"
 			}
 			issues = append(issues, Issue{
 				Snippet: snippetAroundTokens(toks, s.selIdx, whereStop),
@@ -506,15 +506,40 @@ func whereHasTimePredicate(toks []token, start, stop int) bool {
 	return false
 }
 
+// MODIFIED FUNCTION
 func whereHasMeasureNamePredicate(toks []token, start, stop int) bool {
 	if stop < 0 {
 		stop = len(toks)
 	}
 
 	foundValid := false
-	foundInvalid := false // Flag for any non-equality use
+	foundInvalid := false // Flag for any *unapproved* use of measure_name
 
-	for i := start; i < stop && i < len(toks); i++ {
+	i := start
+	for i < stop && i < len(toks) {
+
+		// Check for Pattern 1: regexp_like(measure_name, 'string')
+		// We check this *first* because it contains 'measure_name' and
+		// we need to consume the whole block at once.
+		if toks[i].kind == tkIdent && toks[i].val == "regexp_like" {
+			// Check for regexp_like(measure_name, 'string')
+			if i+5 < stop && i+5 < len(toks) &&
+				toks[i+1].kind == tkSymbol && toks[i+1].val == "(" &&
+				toks[i+2].kind == tkIdent && toks[i+2].val == "measure_name" &&
+				toks[i+3].kind == tkSymbol && toks[i+3].val == "," &&
+				toks[i+4].kind == tkString &&
+				toks[i+5].kind == tkSymbol && toks[i+5].val == ")" {
+
+				foundValid = true
+				i += 6   // Skip past the ')'
+				continue // Continue to next token
+			}
+			// If it's regexp_like but *not* this pattern (e.g., wrong args),
+			// we just treat it as a normal identifier and let the
+			// 'measure_name' check below catch it if it's used inside.
+		}
+
+		// Check for Pattern 2: measure_name = 'string'
 		if toks[i].kind == tkIdent && toks[i].val == "measure_name" {
 			// Check for valid: measure_name = 'string'
 			if i+2 < stop && i+2 < len(toks) &&
@@ -522,11 +547,21 @@ func whereHasMeasureNamePredicate(toks []token, start, stop int) bool {
 				toks[i+2].kind == tkString {
 
 				foundValid = true
+				i += 3   // Skip past the string
+				continue // Continue to next token
+
 			} else {
-				// Any other use of measure_name (e.g., !=, LIKE, or just by itself) is invalid
+				// We found 'measure_name' but it was NOT part of
+				// measure_name = 'string'.
+				// And since we checked regexp_like *first*, we know it's
+				// not the 'measure_name' *inside* a valid regexp_like.
+				// This is an invalid use.
 				foundInvalid = true
 			}
 		}
+
+		// Move to the next token
+		i++
 	}
 	// Must have at least one valid condition and NO invalid conditions.
 	return foundValid && !foundInvalid
